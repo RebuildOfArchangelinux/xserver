@@ -111,10 +111,10 @@ xwl_screen_has_resolution_change_emulation(struct xwl_screen *xwl_screen)
     return xwl_screen->rootless && xwl_screen_has_viewport_support(xwl_screen);
 }
 
-int
-xwl_scale_to(struct xwl_screen *xwl_screen, int value)
+double
+xwl_scale_to(struct xwl_screen *xwl_screen, double value)
 {
-    return value / (double)xwl_screen->global_output_scale + 0.5;
+    return value / xwl_screen->global_output_scale;
 }
 
 /* Return the output @ 0x0, falling back to the first output in the list */
@@ -157,7 +157,8 @@ xwl_screen_set_global_scale_from_property(struct xwl_screen *screen,
     }
 
     propdata = prop->data;
-    xwl_screen_set_global_scale(screen, propdata[0]);
+    float f = *((float *) propdata);
+    xwl_screen_set_global_scale(screen, f);
 }
 
 static void
@@ -169,7 +170,7 @@ xwl_screen_update_property(struct xwl_screen *screen,
         xwl_screen_set_global_scale_from_property(screen, propstate->prop);
         break;
     case PropertyDelete:
-        xwl_screen_set_global_scale(screen, 1);
+        xwl_screen_set_global_scale(screen, 1.);
         break;
     }
 }
@@ -675,10 +676,10 @@ void xwl_surface_damage(struct xwl_screen *xwl_screen,
     if (wl_surface_get_version(surface) >= WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION)
         wl_surface_damage_buffer(surface, x, y, width, height);
     else {
-        x = xwl_scale_to(xwl_screen, x);
-        y = xwl_scale_to(xwl_screen, y);
-        width = xwl_scale_to(xwl_screen, width);
-        height = xwl_scale_to(xwl_screen, height);
+        x = floor(xwl_scale_to(xwl_screen, x));
+        y = floor(xwl_scale_to(xwl_screen, y));
+        width = ceil(xwl_scale_to(xwl_screen, width));
+        height = ceil(xwl_scale_to(xwl_screen, height));
         wl_surface_damage(surface, x, y, width, height);
     }
 }
@@ -750,7 +751,7 @@ xwl_screen_get_next_output_serial(struct xwl_screen *xwl_screen)
 }
 
 void
-xwl_screen_set_global_scale(struct xwl_screen *xwl_screen, int32_t scale)
+xwl_screen_set_global_scale(struct xwl_screen *xwl_screen, double scale)
 {
     struct xwl_output *it;
     struct xwl_window *xwl_window;
@@ -769,6 +770,10 @@ xwl_screen_set_global_scale(struct xwl_screen *xwl_screen, int32_t scale)
         xorg_list_for_each_entry(xwl_window, &xwl_screen->window_list, link_window) {
             xwl_window_buffers_recycle(xwl_window);
         }
+    }
+    xorg_list_for_each_entry(xwl_window, &xwl_screen->window_list, link_window) {
+        xwl_window_check_resolution_change_emulation(xwl_window);
+        wl_surface_commit(xwl_window->surface);
     }
 }
 
@@ -811,7 +816,7 @@ xwl_screen_init(ScreenPtr pScreen, int argc, char **argv)
 #ifdef XWL_HAS_GLAMOR
     xwl_screen->glamor = 1;
 #endif
-    xwl_screen->global_output_scale = 1;
+    xwl_screen->global_output_scale = 1.;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-rootless") == 0) {

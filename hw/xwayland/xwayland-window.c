@@ -218,46 +218,36 @@ unregister_damage(WindowPtr window)
     dixSetPrivate(&window->devPrivates, &xwl_damage_private_key, NULL);
 }
 
-Bool
-xwl_window_has_viewport_enabled(struct xwl_window *xwl_window)
-{
-    return (xwl_window->viewport != NULL);
-}
-
-static void
-xwl_window_disable_viewport(struct xwl_window *xwl_window)
-{
-    assert (xwl_window->viewport);
-
-    DebugF("XWAYLAND: disabling viewport\n");
-    wp_viewport_destroy(xwl_window->viewport);
-    xwl_window->viewport = NULL;
-}
-
 static void
 xwl_window_enable_viewport(struct xwl_window *xwl_window,
                            struct xwl_output *xwl_output,
                            struct xwl_emulated_mode *emulated_mode)
 {
-    if (!xwl_window_has_viewport_enabled(xwl_window)) {
-        DebugF("XWAYLAND: enabling viewport %dx%d -> %dx%d\n",
-               emulated_mode->width, emulated_mode->height,
-               xwl_output->width, xwl_output->height);
-        xwl_window->viewport = wp_viewporter_get_viewport(xwl_window->xwl_screen->viewporter,
-                                                          xwl_window->surface);
+    DrawablePtr drawable;
+    // TODO: Check whether emulated mode is working
+    if (emulated_mode) {
+        wp_viewport_set_source(xwl_window->viewport,
+                            wl_fixed_from_int(0),
+                            wl_fixed_from_int(0),
+                            wl_fixed_from_int(emulated_mode->width),
+                            wl_fixed_from_int(emulated_mode->height));
+        xwl_window->scale_x = (double)emulated_mode->width  / xwl_output->width;
+        xwl_window->scale_y = (double)emulated_mode->height / xwl_output->height;
+        wp_viewport_set_destination(xwl_window->viewport,
+                                    xwl_output->width,
+                                    xwl_output->height);
+    } else {
+        drawable = &xwl_window->window->drawable;
+        wp_viewport_set_source(xwl_window->viewport,
+                            wl_fixed_from_int(-1), wl_fixed_from_int(-1),
+                            wl_fixed_from_int(-1), wl_fixed_from_int(-1));
+        // It seems Wine creates a 1x1 window before going fullscreen
+        wp_viewport_set_destination(xwl_window->viewport,
+                                    fmax(xwl_scale_to(xwl_window->xwl_screen, drawable->width), 1.),
+                                    fmax(xwl_scale_to(xwl_window->xwl_screen, drawable->height), 1.));
+        xwl_window->scale_x = xwl_window->scale_y = 1.f;
     }
 
-    wp_viewport_set_source(xwl_window->viewport,
-                           wl_fixed_from_int(0),
-                           wl_fixed_from_int(0),
-                           wl_fixed_from_int(emulated_mode->width),
-                           wl_fixed_from_int(emulated_mode->height));
-    wp_viewport_set_destination(xwl_window->viewport,
-                                xwl_output->width,
-                                xwl_output->height);
-
-    xwl_window->scale_x = (float)emulated_mode->width  / xwl_output->width;
-    xwl_window->scale_y = (float)emulated_mode->height / xwl_output->height;
 }
 
 static Bool
@@ -396,12 +386,13 @@ void
 xwl_window_check_resolution_change_emulation(struct xwl_window *xwl_window)
 {
     struct xwl_emulated_mode emulated_mode;
-    struct xwl_output *xwl_output;
+    struct xwl_output *xwl_output = NULL;
+    BOOL has_emulated_mode = FALSE;
 
     if (xwl_window_should_enable_viewport(xwl_window, &xwl_output, &emulated_mode))
-        xwl_window_enable_viewport(xwl_window, xwl_output, &emulated_mode);
-    else if (xwl_window_has_viewport_enabled(xwl_window))
-        xwl_window_disable_viewport(xwl_window);
+        has_emulated_mode = TRUE;
+    xwl_window_enable_viewport(xwl_window, xwl_output,
+                               has_emulated_mode ? &emulated_mode : NULL);
 }
 
 /* This checks if the passed in Window is a toplevel client window, note this
@@ -722,8 +713,8 @@ xwl_create_root_surface(struct xwl_window *xwl_window)
     }
 
     wl_region_add(region, 0, 0,
-                  xwl_scale_to(xwl_screen, window->drawable.width),
-                  xwl_scale_to(xwl_screen, window->drawable.height));
+                  round(xwl_scale_to(xwl_screen, window->drawable.width)),
+                  round(xwl_scale_to(xwl_screen, window->drawable.height)));
     wl_surface_set_opaque_region(xwl_window->surface, region);
     wl_region_destroy(region);
 
@@ -796,6 +787,10 @@ ensure_surface_for_window(WindowPtr window)
     xwl_window_buffers_init(xwl_window);
 
     xwl_window_init_allow_commits(xwl_window);
+
+    xwl_window->viewport = wp_viewporter_get_viewport(xwl_window->xwl_screen->viewporter,
+                                                      xwl_window->surface);
+    xwl_window->scale_x = xwl_window->scale_y = 1.;
 
     /* When a new window-manager window is realized, then the randr emulation
      * props may have not been set on the managed client window yet.
@@ -956,8 +951,8 @@ xwl_unrealize_window(WindowPtr window)
     if (!xwl_window)
         return ret;
 
-    if (xwl_window_has_viewport_enabled(xwl_window))
-        xwl_window_disable_viewport(xwl_window);
+    wp_viewport_destroy(xwl_window->viewport);
+    xwl_window->viewport = NULL;
 
 #ifdef GLAMOR_HAS_GBM
     if (xwl_screen->present) {
@@ -1201,7 +1196,6 @@ xwl_window_post_damage(struct xwl_window *xwl_window)
 #endif
 
     wl_surface_attach(xwl_window->surface, buffer, 0, 0);
-    wl_surface_set_buffer_scale(xwl_window->surface, xwl_screen->global_output_scale);
 
     /* Arbitrary limit to try to avoid flooding the Wayland
      * connection. If we flood it too much anyway, this could
